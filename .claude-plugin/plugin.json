@@ -1,1 +1,1 @@
-{ "name": "agent-mood", "version": "0.1.0", "description": "Claude 의 기분 상태를 입력창 위 한 줄과 상태줄에 보여준다", "types": "./types/index.d.ts" }
+{ "name": "agent-mood", "version": "0.2.0", "description": "Claude 의 기분 상태를 입력창 위 한 줄과 상태줄에 보여준다", "types": "./types/index.d.ts" }
