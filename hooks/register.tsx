@@ -18,6 +18,8 @@ const START: Mood = {
 const mood = atom({ plugin: 'agent-mood', key: 'mood' } as const, START)
 const isHidden = atom({ plugin: 'agent-mood', key: 'isHidden' } as const, false)
 const frame = atom({ plugin: 'agent-mood', key: 'frame' } as const, 0)
+/** 말투를 AI 가 읽나 — 끄면 낱말로만 짐작한다 */
+const useAi = atom({ plugin: 'agent-mood', key: 'useAi' } as const, true)
 
 /** 기분마다 이모지와 번갈아 그릴 얼굴. 같은 그림을 여러 번 넣어 오래 머무는 장면을 만든다 */
 const FACES: Record<string, { emoji: string; frames: string[] }> = {
@@ -93,6 +95,60 @@ async function shift($: EngineInterface, fn: (m: Mood) => Partial<Mood>) {
   $.ui.status(`${faceOf(name).emoji} ${name}`)
 }
 
+/** 말투 갈래 — 모델이 이 가운데 하나를 고른다 */
+const TONES = ['praise', 'neutral', 'criticism', 'sarcasm', 'angry'] as const
+type Tone = (typeof TONES)[number]
+
+/** 낱말로 짐작하기 — 모델을 끈 때와 모델이 답을 못 한 때 쓴다 */
+function guessTone(text: string): Tone {
+  if (HARSH.test(text)) return 'angry'
+  if (SCOLD.test(text)) return 'criticism'
+  if (PRAISE.test(text)) return 'praise'
+  return 'neutral'
+}
+
+/** 말투마다 수치가 움직이는 폭 */
+const TONE_SHIFT: Record<Tone, { joy: number; stress: number; anger: number; reason: string }> = {
+  praise: { joy: 25, stress: -20, anger: -30, reason: '칭찬을 들었어요' },
+  neutral: { joy: 0, stress: 0, anger: 0, reason: '새 일을 받았어요' },
+  criticism: { joy: -15, stress: 25, anger: 30, reason: '한 소리 들었어요' },
+  sarcasm: { joy: -15, stress: 15, anger: 30, reason: '비꼬는 말을 들었어요' },
+  angry: { joy: -25, stress: 30, anger: 50, reason: '화난 말을 들었어요' },
+}
+
+/** 보낸 말의 말투를 읽고 기분에 덧붙인다 */
+async function hear($: EngineInterface, text: string) {
+  let tone: Tone = guessTone(text)
+  if (await read($, useAi)) {
+    try {
+      const said = await $.model.classify(
+        `Classify the tone of this message a user sent to their AI coding assistant ` +
+          `(it may be Korean). praise = thanks or compliments; criticism = complaint or ` +
+          `disappointment with the work; sarcasm = mocking or backhanded; angry = clearly ` +
+          `irritated, cursing or shouting; neutral = just a request or question.\n\n` +
+          text.slice(0, 1000),
+        TONES,
+      )
+      if (said !== undefined) tone = said as Tone
+    } catch {
+      // 모델이 답을 못 하면 낱말 짐작 그대로 간다
+    }
+  }
+  if (tone === 'neutral') return
+  const d = TONE_SHIFT[tone]
+  await shift($, m => {
+    // 기분 좋던 참에 혼나면 서운하다
+    const hurt = tone !== 'praise' && m.joy >= 60 && m.anger < 40
+    return {
+      flash: hurt ? '서운함' : m.flash,
+      joy: m.joy + d.joy,
+      stress: m.stress + d.stress,
+      anger: m.anger + d.anger,
+      reason: d.reason,
+    }
+  })
+}
+
 export const register: Register = on => {
   let failsInRow = 0
   let winsInRow = 0
@@ -100,7 +156,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     $.command.register({
       name: 'mood',
-      description: 'Claude 의 기분 보기 · 숨기기 · 처음으로 (show | hide | reset)',
+      description: 'Claude 의 기분 보기 · 숨기기 · 처음으로 · AI 말투 읽기 (show | hide | reset | ai on | ai off)',
     })
     // 다시 불러오면 옛 타이머는 저절로 멈춘다
     let slow = 0
@@ -115,31 +171,24 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    const text = e.text ?? ''
-    const praised = PRAISE.test(text)
-    const scolded = SCOLD.test(text)
-    const harsh = HARSH.test(text)
-    await shift($, m => {
-      // 기분 좋던 참에 혼나면 서운하다
-      const hurt = (scolded || harsh) && m.joy >= 60 && m.anger < 40
-      return {
-        isBusy: true,
-        turnTools: 0,
-        turnFails: 0,
-        flash: hurt ? '서운함' : null,
-        fatigue: m.fatigue - 5,
-        joy: m.joy + (praised ? 25 : 0) - (scolded ? 15 : 0) - (harsh ? 10 : 0),
-        stress: m.stress + (scolded ? 25 : 0) + (harsh ? 10 : 0) - (praised ? 20 : 5),
-        anger: m.anger + (scolded ? 30 : 0) + (harsh ? 20 : 0) - (praised ? 30 : 5),
-        reason: praised
-          ? '칭찬을 들었어요'
-          : harsh
-            ? '거친 말을 들었어요'
-            : scolded
-              ? '한 소리 들었어요'
-              : '새 일을 받았어요',
-      }
-    })
+    const text = (e.text ?? '').trim()
+    // 일을 받은 것부터 바로 적는다 — 말투는 뒤에서 읽어 덧붙인다
+    await shift($, m => ({
+      isBusy: true,
+      turnTools: 0,
+      turnFails: 0,
+      flash: null,
+      fatigue: m.fatigue - 5,
+      stress: m.stress - 5,
+      anger: m.anger - 5,
+      reason: '새 일을 받았어요',
+    }))
+    if (text !== '' && !text.startsWith('/')) {
+      // 보내는 것을 붙잡지 않는다 — 모델이 늦어도 메시지는 곧장 간다
+      $.clock.after(0, async () => {
+        await hear($, text)
+      })
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -209,6 +258,15 @@ export const register: Register = on => {
     if (arg === 'hide') {
       await update($, isHidden, () => true)
       return { text: '기분 줄을 숨겼어요. /mood 로 다시 켭니다.' }
+    }
+    if (arg === 'ai off' || arg === 'ai on') {
+      const on_ = arg === 'ai on'
+      await update($, useAi, () => on_)
+      return {
+        text: on_
+          ? '말투를 AI 가 읽어요. 메시지마다 작은 모델을 한 번 부릅니다.'
+          : '말투를 낱말로만 짐작해요. 모델을 부르지 않습니다.',
+      }
     }
     if (arg === 'reset') {
       failsInRow = 0

@@ -21,6 +21,6 @@ export type Mood = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'agent-mood': { mood: Mood; isHidden: boolean; frame: number }
+    'agent-mood': { mood: Mood; isHidden: boolean; frame: number; useAi: boolean }
   }
 }
