@@ -1,0 +1,5 @@
+{
+  "name": "agent-mood",
+  "owner": { "name": "ngdado07" },
+  "plugins": [{ "name": "agent-mood", "source": "./" }]
+}
